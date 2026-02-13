@@ -324,15 +324,18 @@ func updateSkin(skin string) error {
 
 // rsync to the production environment on the same server
 func rsyncToLocalProduction(config *DeployConfig) error {
-	rsyncParams := "--update"
+	var rsyncArgs []string
+
 	if config.IgnoreTime {
-		rsyncParams = "--inplace"
+		rsyncArgs = []string{"--inplace"}
+	} else {
+		rsyncArgs = []string{"--update"}
 	}
 
 	if config.UpgradeVendor {
 		src := STAGINGPATH + "/vendor/"
 		dst := PRODUCTIONPATH + "/vendor/"
-		if err := runRsync(rsyncParams, src, dst); err != nil {
+		if err := runRsync(rsyncArgs, src, dst); err != nil {
 			return err
 		}
 	}
@@ -340,7 +343,7 @@ func rsyncToLocalProduction(config *DeployConfig) error {
 	for _, ext := range config.UpgradeExtensions {
 		src := fmt.Sprintf("%s/%s/", EXTENSIONPATH, ext)
 		dst := fmt.Sprintf("%s/extensions/%s/", PRODUCTIONPATH, ext)
-		if err := runRsync(rsyncParams, src, dst); err != nil {
+		if err := runRsync(rsyncArgs, src, dst); err != nil {
 			return err
 		}
 	}
@@ -348,7 +351,7 @@ func rsyncToLocalProduction(config *DeployConfig) error {
 	for _, skin := range config.UpgradeSkins {
 		src := fmt.Sprintf("%s/%s/", SKINPATH, skin)
 		dst := fmt.Sprintf("%s/skins/%s/", PRODUCTIONPATH, skin)
-		if err := runRsync(rsyncParams, src, dst); err != nil {
+		if err := runRsync(rsyncArgs, src, dst); err != nil {
 			return err
 		}
 	}
