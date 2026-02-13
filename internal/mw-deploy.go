@@ -47,6 +47,7 @@ type DeployConfig struct {
 	Servers           []string
 	IgnoreTime        bool
 	Force             bool
+	SyncConfig        bool
 }
 
 // actually run the deploy
@@ -102,6 +103,7 @@ func parseFlags(args []string) *DeployConfig {
 	servers := deployCmd.String("servers", "", "Target servers (comma-separated)")
 	ignoreTime := deployCmd.Bool("ignore-time", false, "Use --inplace instead of --update for rsync")
 	force := deployCmd.Bool("force", false, "Force deployment even on errors")
+	syncConfig := deployCmd.Bool("config", false, "Sync the entire root directory (including LocalSettings.php)")
 
 	deployCmd.Parse(args)
 
@@ -112,6 +114,7 @@ func parseFlags(args []string) *DeployConfig {
 		Lang:          *lang,
 		IgnoreTime:    *ignoreTime,
 		Force:         *force,
+		SyncConfig:    *syncConfig,
 	}
 
 	if *upgradeExtensions != "" {
@@ -388,21 +391,54 @@ func rebuildL10n(lang string) error {
 }
 
 // rsync the changed files to the other servers
+// if we pass --config, we rsync the entire mediawiki install, otherwise, just the specific
+// stuff we asked for
 func rsyncToRemoteServer(server string, config *DeployConfig) error {
 	sshCmd := "ssh -i /prod/mediawiki-staging/deploykey"
 
-	rsyncArgs := []string{"-e", sshCmd}
+	baseArgs := []string{"-e", sshCmd}
 
 	if config.IgnoreTime {
-		rsyncArgs = append(rsyncArgs, "--inplace")
+		baseArgs = append(baseArgs, "--inplace")
 	} else {
-		rsyncArgs = append(rsyncArgs, "--update")
+		baseArgs = append(baseArgs, "--update")
 	}
 
-	src := PRODUCTIONPATH + "/"
-	dst := fmt.Sprintf("%s@%s:%s/", DEPLOYUSER, server, PRODUCTIONPATH)
+	if config.SyncConfig {
+		src := PRODUCTIONPATH + "/"
+		dst := fmt.Sprintf("%s@%s:%s/", DEPLOYUSER, server, PRODUCTIONPATH)
+		fmt.Printf("  -> [CONFIG] Syncing entire MediaWiki root to %s...\n", server)
+		return runRsync(baseArgs, src, dst)
+	}
 
-	return runRsync(rsyncArgs, src, dst)
+	if config.UpgradeVendor {
+		src := PRODUCTIONPATH + "/vendor/"
+		dst := fmt.Sprintf("%s@%s:%s/vendor/", DEPLOYUSER, server, PRODUCTIONPATH)
+		fmt.Printf("-> Syncing vendor to %s...\n", server)
+		if err := runRsync(baseArgs, src, dst); err != nil {
+			return err
+		}
+	}
+
+	for _, ext := range config.UpgradeExtensions {
+		src := fmt.Sprintf("%s/extensions/%s/", PRODUCTIONPATH, ext)
+		dst := fmt.Sprintf("%s@%s:%s/extensions/%s/", DEPLOYUSER, server, PRODUCTIONPATH, ext)
+		fmt.Printf("-> Syncing extension %s to %s...\n", ext, server)
+		if err := runRsync(baseArgs, src, dst); err != nil {
+			return err
+		}
+	}
+
+	for _, skin := range config.UpgradeSkins {
+		src := fmt.Sprintf("%s/skins/%s/", PRODUCTIONPATH, skin)
+		dst := fmt.Sprintf("%s@%s:%s/skins/%s/", DEPLOYUSER, server, PRODUCTIONPATH, skin)
+		fmt.Printf("-> Syncing skin %s to %s...\n", skin, server)
+		if err := runRsync(baseArgs, src, dst); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 // helper to run a command
