@@ -386,18 +386,20 @@ func rebuildL10n(lang string) error {
 
 // rsync the changed files to the other servers
 func rsyncToRemoteServer(server string, config *DeployConfig) error {
-	rsyncParams := "-e ssh -i /prod/mediawiki-staging/deploykey"
+	sshCmd := "ssh -i /prod/mediawiki-staging/deploykey"
+
+	rsyncArgs := []string{"-e", sshCmd}
 
 	if config.IgnoreTime {
-		rsyncParams = "--inplace " + rsyncParams
+		rsyncArgs = append(rsyncArgs, "--inplace")
 	} else {
-		rsyncParams = "--update " + rsyncParams
+		rsyncArgs = append(rsyncArgs, "--update")
 	}
 
 	src := PRODUCTIONPATH + "/"
 	dst := fmt.Sprintf("%s@%s:%s/", DEPLOYUSER, server, PRODUCTIONPATH)
 
-	return runRsync(rsyncParams, src, dst)
+	return runRsync(rsyncArgs, src, dst)
 }
 
 // helper to run a command
@@ -409,9 +411,10 @@ func runCommand(name string, args ...string) error {
 }
 
 // helper to run rsync
-func runRsync(params, src, dst string) error {
-	args := strings.Split(params, " ")
-	args = append(args, "-r", "--delete", "--exclude=.*", src, dst)
+func runRsync(baseArgs []string, src, dst string) error {
+	args := append(baseArgs, "-r", "--delete", "--exclude=.*", src, dst)
+
+	fmt.Printf("DEBUG: Executing rsync with args: %v\n", args)
 
 	return runCommand("rsync", args...)
 }
