@@ -33,6 +33,9 @@ var VALIDEXTENSIONS []string
 // valid skins that this script can work on - a skin must exist and have a .git folder to be valid
 var VALIDSKINS []string
 
+// all of the servers that are valid
+var ALLSERVERS = []string{"mw1", "mw2", "mwtask1"}
+
 // all possible deploy options
 type DeployConfig struct {
 	UpgradeExtensions []string
@@ -120,7 +123,11 @@ func parseFlags(args []string) *DeployConfig {
 	}
 
 	if *servers != "" {
-		config.Servers = strings.Split(*servers, ",")
+		if *servers == "all" {
+			config.Servers = ALLSERVERS
+		} else {
+			config.Servers = strings.Split(*servers, ",")
+		}
 	}
 
 	return config
