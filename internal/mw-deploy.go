@@ -68,6 +68,9 @@ func RunDeploy(args []string) {
 		config.IgnoreTime = true
 	}
 
+	VALIDEXTENSIONS = GetValidExtensions()
+	VALIDSKINS = GetValidSkins()
+
 	// validate our config is valid first before we do anything
 	if err := validateConfig(config); err != nil {
 		log.Fatal(err)
