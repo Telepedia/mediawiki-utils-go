@@ -287,25 +287,45 @@ func executeDeploy(config *DeployConfig) error {
 			}
 		}
 
+		// only extensions/skins whose pull actually changed something get
+		// rsynced
+		var changedExtensions []string
 		for _, ext := range config.UpgradeExtensions {
 			fmt.Printf("Updating extension: %s\n", ext)
-			if err := updateExtension(ext); err != nil {
+			changed, err := updateExtension(ext)
+			if err != nil {
 				exitCodes = append(exitCodes, 1)
 				if !config.Force {
 					return err
 				}
+				continue
+			}
+			if changed {
+				changedExtensions = append(changedExtensions, ext)
+			} else {
+				fmt.Printf("%s already up to date, skipping\n", ext)
 			}
 		}
+		config.UpgradeExtensions = changedExtensions
 
+		var changedSkins []string
 		for _, skin := range config.UpgradeSkins {
 			fmt.Printf("Updating skin: %s\n", skin)
-			if err := updateSkin(skin); err != nil {
+			changed, err := updateSkin(skin)
+			if err != nil {
 				exitCodes = append(exitCodes, 1)
 				if !config.Force {
 					return err
 				}
+				continue
+			}
+			if changed {
+				changedSkins = append(changedSkins, skin)
+			} else {
+				fmt.Printf("%s already up to date, skipping\n", skin)
 			}
 		}
+		config.UpgradeSkins = changedSkins
 
 		if err := rsyncToLocalProduction(config); err != nil {
 			exitCodes = append(exitCodes, 1)
@@ -368,26 +388,44 @@ func updateVendor() error {
 	return nil
 }
 
-// update extensions
-func updateExtension(extension string) error {
+// update extensions. Returns true if the pull actually brought in new commits
+func updateExtension(extension string) (bool, error) {
 	extPath := fmt.Sprintf("%s/%s", EXTENSIONPATH, extension)
 
-	if err := runCommand("git", "-C", extPath, "pull", "--recurse-submodules", "--quiet"); err != nil {
-		return fmt.Errorf("failed to update extension %s: %w", extension, err)
+	changed, err := gitPull(extPath, "--recurse-submodules")
+	if err != nil {
+		return false, fmt.Errorf("failed to update extension %s: %w", extension, err)
 	}
 
-	return nil
+	return changed, nil
 }
 
-// update skins
-func updateSkin(skin string) error {
+// update skins. Returns true if the pull actually brought in new commits
+func updateSkin(skin string) (bool, error) {
 	skinPath := fmt.Sprintf("%s/%s", SKINPATH, skin)
 
-	if err := runCommand("git", "-C", skinPath, "pull", "--quiet"); err != nil {
-		return fmt.Errorf("failed to update skin %s: %w", skin, err)
+	changed, err := gitPull(skinPath)
+	if err != nil {
+		return false, fmt.Errorf("failed to update skin %s: %w", skin, err)
 	}
 
-	return nil
+	return changed, nil
+}
+
+// run a git pull in dir and report whether it brought in changes.
+func gitPull(dir string, extraArgs ...string) (bool, error) {
+	args := append([]string{"-C", dir, "pull"}, extraArgs...)
+	out, err := exec.Command("git", args...).CombinedOutput()
+
+	output := strings.TrimSpace(string(out))
+	if output != "" {
+		fmt.Println(output)
+	}
+	if err != nil {
+		return false, err
+	}
+
+	return output != "Already up to date.", nil
 }
 
 // rsync to the production environment on the same server
