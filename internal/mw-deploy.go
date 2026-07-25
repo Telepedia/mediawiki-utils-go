@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 )
 
@@ -27,14 +28,33 @@ const STAGINGPATH = "/prod/mediawiki-staging"
 // bare path for prod env
 const PRODUCTIONPATH = "/prod/mediawiki"
 
+// the wiki database name passed to maintenance scripts
+const WIKIDBNAME = "metawiki"
+
+// runner script all maintenance scripts go through since we're beyond 1.39
+var RUNNER = PRODUCTIONPATH + "/maintenance/run.php"
+
 // valid extensions that this script can work on - a extension must exist and have a .git folder to be valid
 var VALIDEXTENSIONS []string
 
 // valid skins that this script can work on - a skin must exist and have a .git folder to be valid
 var VALIDSKINS []string
 
+// a deploy target. Name is matched against the local the local hostnamae is
+// used to check whether we are runnin locally whilst the fqdn is used for the actual
+// sync
+type Server struct {
+	Name    string
+	SSHHost string
+}
+
 // all of the servers that are valid
-var ALLSERVERS = []string{"mw1", "mw2", "mwtask1"}
+var ALLSERVERS = []Server{
+	{Name: "mw1", SSHHost: "mw1"},
+	{Name: "mw2", SSHHost: "mw2"},
+	{Name: "mwtask1", SSHHost: "mwtask1"},
+	{Name: "jobrunner", SSHHost: "jobrunner.telepedia.internal"},
+}
 
 // all possible deploy options
 type DeployConfig struct {
@@ -44,7 +64,7 @@ type DeployConfig struct {
 	UpgradeWorld      bool
 	L10n              bool
 	Lang              string
-	Servers           []string
+	Servers           []Server
 	IgnoreTime        bool
 	Force             bool
 	SyncConfig        bool
@@ -63,6 +83,9 @@ func RunDeploy(args []string) {
 
 	config := parseFlags(args)
 
+	VALIDEXTENSIONS = GetValidExtensions()
+	VALIDSKINS = GetValidSkins()
+
 	// --upgrade-world is a helper to do everything
 	if config.UpgradeWorld {
 		config.UpgradeExtensions = VALIDEXTENSIONS
@@ -71,9 +94,6 @@ func RunDeploy(args []string) {
 		config.L10n = true
 		config.IgnoreTime = true
 	}
-
-	VALIDEXTENSIONS = GetValidExtensions()
-	VALIDSKINS = GetValidSkins()
 
 	// validate our config is valid first before we do anything
 	if err := validateConfig(config); err != nil {
@@ -126,14 +146,43 @@ func parseFlags(args []string) *DeployConfig {
 	}
 
 	if *servers != "" {
-		if *servers == "all" {
-			config.Servers = ALLSERVERS
-		} else {
-			config.Servers = strings.Split(*servers, ",")
+		resolved, err := resolveServers(*servers)
+		if err != nil {
+			fmt.Println(err)
+			os.Exit(1)
 		}
+		config.Servers = resolved
 	}
 
 	return config
+}
+
+// resolve a comma-separated server string into concrete Server targets. "all"
+// expands to every known server
+func resolveServers(input string) ([]Server, error) {
+	if input == "all" {
+		return ALLSERVERS, nil
+	}
+
+	var result []Server
+	for _, name := range strings.Split(input, ",") {
+		srv, ok := findServer(name)
+		if !ok {
+			return nil, fmt.Errorf("invalid server: %s", name)
+		}
+		result = append(result, srv)
+	}
+	return result, nil
+}
+
+// find a known server by its name
+func findServer(name string) (Server, bool) {
+	for _, s := range ALLSERVERS {
+		if s.Name == name {
+			return s, true
+		}
+	}
+	return Server{}, false
 }
 
 // validate that what the user asked for is actually valid
@@ -154,11 +203,27 @@ func validateConfig(config *DeployConfig) error {
 		return fmt.Errorf("at least one server required")
 	}
 
-	if config.Lang != "" && !config.L10n {
-		return fmt.Errorf("--lang requires --l10n flag")
+	if config.Lang != "" {
+		if !config.L10n {
+			return fmt.Errorf("--lang requires --l10n flag")
+		}
+		for _, lang := range strings.Split(config.Lang, ",") {
+			if !isValidLangTag(lang) {
+				return fmt.Errorf("invalid language tag: %s", lang)
+			}
+		}
 	}
 
 	return nil
+}
+
+// lightweight BCP-47-ish check to check whether the language passed
+// is likely to be valid; this isn't exhaustive and there may be edge cases
+// that return false when actually valid
+var langTagRe = regexp.MustCompile(`^[a-zA-Z]{2,3}(-[a-zA-Z0-9]{2,8})*$`)
+
+func isValidLangTag(tag string) bool {
+	return langTagRe.MatchString(tag)
 }
 
 // get all of the valid extensions - in order to be valid, it must exist in the extension path, and be
@@ -210,7 +275,7 @@ func GetValidSkins() []string {
 func executeDeploy(config *DeployConfig) error {
 	var exitCodes []int
 
-	if contains(config.Servers, HOSTNAME) {
+	if isLocalHost(config.Servers) {
 
 		if config.UpgradeVendor {
 			fmt.Println("Updating vendor...")
@@ -261,10 +326,10 @@ func executeDeploy(config *DeployConfig) error {
 	}
 
 	for _, server := range config.Servers {
-		if server == HOSTNAME {
+		if server.Name == HOSTNAME {
 			continue
 		}
-		fmt.Printf("Syncing to remote server: %s\n", server)
+		fmt.Printf("Syncing to remote server: %s\n", server.Name)
 		if err := rsyncToRemoteServer(server, config); err != nil {
 			exitCodes = append(exitCodes, 1)
 			if !config.Force {
@@ -365,24 +430,28 @@ func rsyncToLocalProduction(config *DeployConfig) error {
 // rebuild l10n
 func rebuildL10n(lang string) error {
 	mergeScript := PRODUCTIONPATH + "/extensions/TelepediaMagic/maintenance/mergeMessageFileList.php"
-	cmd := exec.Command("php", mergeScript,
+	cmd := exec.Command("php", RUNNER, mergeScript,
 		"--quiet",
-		"--wiki=metawiki",
+		"--wiki="+WIKIDBNAME,
 		"--extensions-dir=/prod/mediawiki/extensions:/prod/mediawiki/skins",
 		"--output", PRODUCTIONPATH+"/config/ExtensionMessageFiles.php")
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
 
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("failed to merge message files: %w", err)
 	}
 
 	rebuildScript := PRODUCTIONPATH + "/maintenance/rebuildLocalisationCache.php"
-	args := []string{rebuildScript, "--quiet", "--wiki=metawiki"}
+	args := []string{RUNNER, rebuildScript, "--quiet", "--wiki=" + WIKIDBNAME}
 
 	if lang != "" {
 		args = append(args, fmt.Sprintf("--lang=%s", lang))
 	}
 
 	cmd = exec.Command("php", args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("failed to rebuild l10n cache: %w", err)
 	}
@@ -393,7 +462,7 @@ func rebuildL10n(lang string) error {
 // rsync the changed files to the other servers
 // if we pass --config, we rsync the entire mediawiki install, otherwise, just the specific
 // stuff we asked for
-func rsyncToRemoteServer(server string, config *DeployConfig) error {
+func rsyncToRemoteServer(server Server, config *DeployConfig) error {
 	sshCmd := "ssh -i /prod/mediawiki-staging/deploykey"
 
 	baseArgs := []string{"-e", sshCmd}
@@ -406,15 +475,15 @@ func rsyncToRemoteServer(server string, config *DeployConfig) error {
 
 	if config.SyncConfig {
 		src := PRODUCTIONPATH + "/"
-		dst := fmt.Sprintf("%s@%s:%s/", DEPLOYUSER, server, PRODUCTIONPATH)
-		fmt.Printf("  -> [CONFIG] Syncing entire MediaWiki root to %s...\n", server)
+		dst := fmt.Sprintf("%s@%s:%s/", DEPLOYUSER, server.SSHHost, PRODUCTIONPATH)
+		fmt.Printf("  -> [CONFIG] Syncing entire MediaWiki root to %s...\n", server.Name)
 		return runRsync(baseArgs, src, dst)
 	}
 
 	if config.UpgradeVendor {
 		src := PRODUCTIONPATH + "/vendor/"
-		dst := fmt.Sprintf("%s@%s:%s/vendor/", DEPLOYUSER, server, PRODUCTIONPATH)
-		fmt.Printf("-> Syncing vendor to %s...\n", server)
+		dst := fmt.Sprintf("%s@%s:%s/vendor/", DEPLOYUSER, server.SSHHost, PRODUCTIONPATH)
+		fmt.Printf("-> Syncing vendor to %s...\n", server.Name)
 		if err := runRsync(baseArgs, src, dst); err != nil {
 			return err
 		}
@@ -422,8 +491,8 @@ func rsyncToRemoteServer(server string, config *DeployConfig) error {
 
 	for _, ext := range config.UpgradeExtensions {
 		src := fmt.Sprintf("%s/extensions/%s/", PRODUCTIONPATH, ext)
-		dst := fmt.Sprintf("%s@%s:%s/extensions/%s/", DEPLOYUSER, server, PRODUCTIONPATH, ext)
-		fmt.Printf("-> Syncing extension %s to %s...\n", ext, server)
+		dst := fmt.Sprintf("%s@%s:%s/extensions/%s/", DEPLOYUSER, server.SSHHost, PRODUCTIONPATH, ext)
+		fmt.Printf("-> Syncing extension %s to %s...\n", ext, server.Name)
 		if err := runRsync(baseArgs, src, dst); err != nil {
 			return err
 		}
@@ -431,8 +500,8 @@ func rsyncToRemoteServer(server string, config *DeployConfig) error {
 
 	for _, skin := range config.UpgradeSkins {
 		src := fmt.Sprintf("%s/skins/%s/", PRODUCTIONPATH, skin)
-		dst := fmt.Sprintf("%s@%s:%s/skins/%s/", DEPLOYUSER, server, PRODUCTIONPATH, skin)
-		fmt.Printf("-> Syncing skin %s to %s...\n", skin, server)
+		dst := fmt.Sprintf("%s@%s:%s/skins/%s/", DEPLOYUSER, server.SSHHost, PRODUCTIONPATH, skin)
+		fmt.Printf("-> Syncing skin %s to %s...\n", skin, server.Name)
 		if err := runRsync(baseArgs, src, dst); err != nil {
 			return err
 		}
@@ -456,6 +525,16 @@ func runRsync(baseArgs []string, src, dst string) error {
 	fmt.Printf("DEBUG: Executing rsync with args: %v\n", args)
 
 	return runCommand("rsync", args...)
+}
+
+// short check to see if we currently running on one of the target servers
+func isLocalHost(servers []Server) bool {
+	for _, s := range servers {
+		if s.Name == HOSTNAME {
+			return true
+		}
+	}
+	return false
 }
 
 // helper to check if a []string array contains a specific item
