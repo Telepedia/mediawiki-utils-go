@@ -379,8 +379,10 @@ func updateVendor() error {
 		return fmt.Errorf("failed to pull vendor: %w", err)
 	}
 
-	cmd := exec.Command("composer", "update", "--no-dev", "--quiet")
+	cmd := deployCmd("composer", "update", "--no-dev", "--quiet")
 	cmd.Dir = STAGINGPATH
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("failed to run composer update: %w", err)
 	}
@@ -415,7 +417,7 @@ func updateSkin(skin string) (bool, error) {
 // run a git pull in dir and report whether it brought in changes.
 func gitPull(dir string, extraArgs ...string) (bool, error) {
 	args := append([]string{"-C", dir, "pull"}, extraArgs...)
-	out, err := exec.Command("git", args...).CombinedOutput()
+	out, err := deployCmd("git", args...).CombinedOutput()
 
 	output := strings.TrimSpace(string(out))
 	if output != "" {
@@ -468,7 +470,7 @@ func rsyncToLocalProduction(config *DeployConfig) error {
 // rebuild l10n
 func rebuildL10n(lang string) error {
 	mergeScript := PRODUCTIONPATH + "/extensions/TelepediaMagic/maintenance/mergeMessageFileList.php"
-	cmd := exec.Command("php", RUNNER, mergeScript,
+	cmd := deployCmd("php", RUNNER, mergeScript,
 		"--quiet",
 		"--wiki="+WIKIDBNAME,
 		"--extensions-dir=/prod/mediawiki/extensions:/prod/mediawiki/skins",
@@ -487,7 +489,7 @@ func rebuildL10n(lang string) error {
 		args = append(args, fmt.Sprintf("--lang=%s", lang))
 	}
 
-	cmd = exec.Command("php", args...)
+	cmd = deployCmd("php", args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
@@ -548,9 +550,15 @@ func rsyncToRemoteServer(server Server, config *DeployConfig) error {
 	return nil
 }
 
-// helper to run a command
+// build an *exec.Cmd that runs as the deploy user.
+// this is called by runCommand because I'm too lazy to change refs
+func deployCmd(name string, args ...string) *exec.Cmd {
+	return exec.Command("sudo", append([]string{"-u", DEPLOYUSER, name}, args...)...)
+}
+
+// helper to run a command as the deploy user
 func runCommand(name string, args ...string) error {
-	cmd := exec.Command(name, args...)
+	cmd := deployCmd(name, args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
@@ -559,8 +567,6 @@ func runCommand(name string, args ...string) error {
 // helper to run rsync
 func runRsync(baseArgs []string, src, dst string) error {
 	args := append(baseArgs, "-r", "--delete", "--exclude=.*", src, dst)
-
-	fmt.Printf("DEBUG: Executing rsync with args: %v\n", args)
 
 	return runCommand("rsync", args...)
 }
